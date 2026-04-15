@@ -6,12 +6,13 @@ import re
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence, TypeAlias
 
 from models import MarketPnL, NormalizedTrade
 
 
 UTC = timezone.utc
+ProgressCallback: TypeAlias = Callable[[int | None, int | None, str | None], None]
 WEEKDAY_NAMES = [
     "Monday",
     "Tuesday",

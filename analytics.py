@@ -22,6 +22,7 @@ from models import (
     WinLossRate,
 )
 from utils import (
+    ProgressCallback,
     WEEKDAY_NAMES,
     dedupe_preserve_order,
     humanize_duration,
@@ -205,15 +206,36 @@ class _Aggregate:
 def normalize_trades(
     activities: Sequence,
     metadata_by_event_slug: dict[str, EventMetadata],
+    progress_callback: ProgressCallback | None = None,
 ) -> list[NormalizedTrade]:
     """Normalize public activity records into the internal trade schema."""
 
     output: list[NormalizedTrade] = []
     topic_context_cache: dict[tuple[str, str], dict[str, object]] = {}
-    for activity in activities:
+    total_activities = len(activities)
+    if progress_callback is not None:
+        progress_callback(0, total_activities, "Normalizing trades")
+
+    for index, activity in enumerate(activities, start=1):
         if str(activity.type) != "TRADE":
+            if progress_callback is not None and (
+                index == total_activities or index % 1000 == 0
+            ):
+                progress_callback(
+                    index,
+                    total_activities,
+                    f"Normalizing trades ({len(output):,} trades)",
+                )
             continue
         if activity.side is None or activity.price is None or not activity.asset:
+            if progress_callback is not None and (
+                index == total_activities or index % 1000 == 0
+            ):
+                progress_callback(
+                    index,
+                    total_activities,
+                    f"Normalizing trades ({len(output):,} trades)",
+                )
             continue
 
         event_meta = metadata_by_event_slug.get(activity.event_slug or "")
@@ -258,6 +280,15 @@ def normalize_trades(
                 market_type=topic_context["market_type"],
             )
         )
+
+        if progress_callback is not None and (
+            index == total_activities or index % 1000 == 0
+        ):
+            progress_callback(
+                index,
+                total_activities,
+                f"Normalizing trades ({len(output):,} trades)",
+            )
 
     output.sort(
         key=lambda trade: (

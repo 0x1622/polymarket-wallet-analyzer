@@ -162,6 +162,14 @@ Default terminal output uses `rich` tables and panels and includes:
 - a plain-English summary
 - explicit PnL assumptions
 
+Interactive terminal runs also show a live progress display while the CLI is:
+
+- loading trade history
+- fetching event metadata
+- normalizing trades
+- loading position snapshots
+- running the final analysis
+
 JSON output contains the full analysis payload, including:
 
 - normalized trades

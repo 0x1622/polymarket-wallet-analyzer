@@ -22,7 +22,7 @@ from models import (
     SearchResults,
     TotalValueSnapshot,
 )
-from utils import PolymarketAPIError
+from utils import PolymarketAPIError, ProgressCallback
 
 
 class PolymarketClient:
@@ -142,6 +142,7 @@ class PolymarketClient:
         end_ts: int | None = None,
         activity_types: Sequence[ActivityKind | str] = (ActivityKind.TRADE,),
         limit: int = 500,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[ActivityRecord]:
         """Fetch all matching user activity, handling offset caps via time windows.
 
@@ -158,6 +159,10 @@ class PolymarketClient:
         cursor_end = end_ts
         records: list[ActivityRecord] = []
         seen_keys: set[tuple[Any, ...]] = set()
+        pages_loaded = 0
+
+        if progress_callback is not None:
+            progress_callback(0, None, "Loading trade activity")
 
         while True:
             offset = 0
@@ -187,6 +192,7 @@ class PolymarketClient:
                     break
 
                 window_any_results = True
+                pages_loaded += 1
                 for record in page:
                     dedupe_key = (
                         record.transaction_hash,
@@ -209,6 +215,16 @@ class PolymarketClient:
                     if window_oldest_ts is None
                     else min(window_oldest_ts, oldest_in_page)
                 )
+
+                if progress_callback is not None:
+                    estimated_total = (
+                        pages_loaded if len(page) < limit else pages_loaded + 1
+                    )
+                    progress_callback(
+                        pages_loaded,
+                        estimated_total,
+                        f"Loading trade activity ({len(records):,} trades)",
+                    )
 
                 if len(page) < limit:
                     reached_offset_cap = False
@@ -257,7 +273,11 @@ class PolymarketClient:
         )
         return self._activity_adapter.validate_python(payload)
 
-    def get_current_positions(self, wallet: str) -> list[PositionSnapshot]:
+    def get_current_positions(
+        self,
+        wallet: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[PositionSnapshot]:
         """Fetch all current positions for a wallet."""
 
         return asyncio.run(
@@ -266,10 +286,16 @@ class PolymarketClient:
                 endpoint="/positions",
                 page_limit=500,
                 adapter=self._positions_adapter,
+                progress_callback=progress_callback,
+                progress_label="Loading current positions",
             )
         )
 
-    def get_closed_positions(self, wallet: str) -> list[ClosedPositionSnapshot]:
+    def get_closed_positions(
+        self,
+        wallet: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[ClosedPositionSnapshot]:
         """Fetch all closed positions for a wallet."""
 
         return asyncio.run(
@@ -278,6 +304,8 @@ class PolymarketClient:
                 endpoint="/closed-positions",
                 page_limit=50,
                 adapter=self._closed_positions_adapter,
+                progress_callback=progress_callback,
+                progress_label="Loading closed positions",
             )
         )
 
@@ -317,7 +345,11 @@ class PolymarketClient:
         self._event_cache[cache_key] = event
         return event
 
-    def get_events_by_slug(self, slugs: Sequence[str]) -> dict[str, EventMetadata]:
+    def get_events_by_slug(
+        self,
+        slugs: Sequence[str],
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, EventMetadata]:
         """Fetch unique event metadata records with per-run caching.
 
         Large trader histories can touch hundreds of events. The slow path in the
@@ -330,16 +362,33 @@ class PolymarketClient:
         if not unique_slugs:
             return {}
 
+        if progress_callback is not None:
+            progress_callback(0, len(unique_slugs), "Fetching event metadata")
+
         missing_slugs = [
             slug for slug in unique_slugs if slug.casefold() not in self._event_cache
         ]
+        cached_count = len(unique_slugs) - len(missing_slugs)
+        if progress_callback is not None and cached_count:
+            progress_callback(
+                cached_count,
+                len(unique_slugs),
+                f"Fetching event metadata ({cached_count:,}/{len(unique_slugs):,})",
+            )
         if missing_slugs:
             self.logger.debug(
                 "fetching %d event metadata records with concurrency=%d",
                 len(missing_slugs),
                 self.metadata_concurrency,
             )
-            fetched_events = asyncio.run(self._get_events_by_slug_async(missing_slugs))
+            fetched_events = asyncio.run(
+                self._get_events_by_slug_async(
+                    missing_slugs,
+                    total_unique=len(unique_slugs),
+                    cached_count=cached_count,
+                    progress_callback=progress_callback,
+                )
+            )
             for slug, event in fetched_events.items():
                 self._event_cache[slug.casefold()] = event
 
@@ -353,7 +402,12 @@ class PolymarketClient:
         return output
 
     async def _get_events_by_slug_async(
-        self, slugs: Sequence[str]
+        self,
+        slugs: Sequence[str],
+        *,
+        total_unique: int,
+        cached_count: int,
+        progress_callback: ProgressCallback | None,
     ) -> dict[str, EventMetadata | None]:
         timeout = httpx.Timeout(self.timeout_seconds, connect=10.0)
         limits = httpx.Limits(
@@ -362,6 +416,7 @@ class PolymarketClient:
         )
         semaphore = asyncio.Semaphore(self.metadata_concurrency)
         output: dict[str, EventMetadata | None] = {}
+        fetched_count = 0
 
         async with httpx.AsyncClient(
             base_url=self.GAMMA_API_BASE,
@@ -371,6 +426,7 @@ class PolymarketClient:
         ) as client:
 
             async def fetch_one(slug: str) -> None:
+                nonlocal fetched_count
                 async with semaphore:
                     encoded_slug = quote(slug, safe="")
                     payload = await self._request_json_async(
@@ -381,8 +437,19 @@ class PolymarketClient:
                     )
                     if payload is None:
                         output[slug] = None
-                        return
-                    output[slug] = self._event_adapter.validate_python(payload)
+                    else:
+                        output[slug] = self._event_adapter.validate_python(payload)
+
+                    fetched_count += 1
+                    completed_count = cached_count + fetched_count
+                    if progress_callback is not None and (
+                        completed_count == total_unique or completed_count % 10 == 0
+                    ):
+                        progress_callback(
+                            completed_count,
+                            total_unique,
+                            f"Fetching event metadata ({completed_count:,}/{total_unique:,})",
+                        )
 
             await asyncio.gather(*(fetch_one(slug) for slug in slugs))
 
@@ -395,6 +462,8 @@ class PolymarketClient:
         endpoint: str,
         page_limit: int,
         adapter: TypeAdapter,
+        progress_callback: ProgressCallback | None,
+        progress_label: str,
     ) -> list[Any]:
         batch_size = max(1, self.DATA_PAGINATION_BATCH_SIZE)
         timeout = httpx.Timeout(self.timeout_seconds, connect=10.0)
@@ -404,6 +473,11 @@ class PolymarketClient:
         )
         results: list[Any] = []
         next_offset = 0
+        pages_loaded = 0
+        rows_loaded = 0
+
+        if progress_callback is not None:
+            progress_callback(0, None, progress_label)
 
         async with httpx.AsyncClient(
             base_url=self.DATA_API_BASE,
@@ -431,7 +505,20 @@ class PolymarketClient:
 
                 reached_end = False
                 for page in pages:
+                    pages_loaded += 1
                     results.extend(page)
+                    rows_loaded += len(page)
+                    if progress_callback is not None:
+                        estimated_total = (
+                            pages_loaded
+                            if len(page) < page_limit
+                            else pages_loaded + batch_size
+                        )
+                        progress_callback(
+                            pages_loaded,
+                            estimated_total,
+                            f"{progress_label} ({rows_loaded:,} rows)",
+                        )
                     if len(page) < page_limit:
                         reached_end = True
                         break

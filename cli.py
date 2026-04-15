@@ -13,6 +13,7 @@ from utils import (
     AmbiguousResolutionError,
     NoTradesFoundError,
     PolymarketError,
+    ProgressCallback,
     UTC,
     configure_logging,
     end_of_day_utc,
@@ -27,10 +28,108 @@ from utils import (
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 
 console = Console()
+
+
+class CliProgressDisplay:
+    """Render pipeline progress for interactive CLI runs."""
+
+    TOTAL_STEPS = 8
+
+    def __init__(self, console: Console, enabled: bool) -> None:
+        self.console = console
+        self.enabled = enabled
+        self.progress: Progress | None = None
+        self.pipeline_task_id: TaskID | None = None
+        self.stage_task_id: TaskID | None = None
+
+    def __enter__(self) -> "CliProgressDisplay":
+        if not self.enabled:
+            return self
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=None),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=self.console,
+            transient=True,
+        )
+        self.progress.start()
+        self.pipeline_task_id = self.progress.add_task(
+            "Pipeline", total=self.TOTAL_STEPS
+        )
+        self.stage_task_id = self.progress.add_task("Starting", total=None)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.progress is not None:
+            self.progress.stop()
+
+    def start_stage(self, description: str, total: int | None = None) -> None:
+        if self.progress is None or self.stage_task_id is None:
+            return
+        self.progress.update(
+            self.stage_task_id,
+            description=description,
+            total=total,
+            completed=0,
+            visible=True,
+        )
+
+    def update_stage(
+        self,
+        completed: int | None = None,
+        total: int | None = None,
+        description: str | None = None,
+    ) -> None:
+        if self.progress is None or self.stage_task_id is None:
+            return
+        update_kwargs: dict[str, object] = {}
+        if completed is not None:
+            update_kwargs["completed"] = completed
+        if total is not None:
+            update_kwargs["total"] = total
+        if description is not None:
+            update_kwargs["description"] = description
+        if update_kwargs:
+            self.progress.update(self.stage_task_id, **update_kwargs)
+
+    def complete_stage(self, description: str | None = None) -> None:
+        if self.progress is None or self.stage_task_id is None:
+            return
+        stage_task = self.progress.tasks[self.stage_task_id]
+        total = int(stage_task.total or max(stage_task.completed, 1))
+        self.progress.update(
+            self.stage_task_id,
+            description=description or stage_task.description,
+            total=total,
+            completed=total,
+        )
+        if self.pipeline_task_id is not None:
+            self.progress.advance(self.pipeline_task_id, 1)
+
+    def callback(self) -> ProgressCallback:
+        def _callback(
+            completed: int | None,
+            total: int | None,
+            description: str | None,
+        ) -> None:
+            self.update_stage(completed=completed, total=total, description=description)
+
+        return _callback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,57 +189,109 @@ def main(argv: Sequence[str] | None = None) -> int:
             api_passphrase=args.api_passphrase,
         )
 
-        with PolymarketClient(credentials=credentials) as client:
-            resolver = ProfileResolver(client)
-            trader = resolver.resolve(wallet=args.wallet, name=args.name)
+        progress_enabled = not args.json and console.is_terminal
+        with CliProgressDisplay(console=console, enabled=progress_enabled) as progress:
+            with PolymarketClient(credentials=credentials) as client:
+                resolver = ProfileResolver(client)
 
-            history_end_ts = int(analysis_end.astimezone(UTC).timestamp())
-            activities = client.get_user_activity(
-                trader.wallet,
-                end_ts=history_end_ts,
-                activity_types=("TRADE",),
-            )
-            if not activities:
-                raise NoTradesFoundError(
-                    "No public trade activity was found for this trader."
+                progress.start_stage("Resolving trader", total=1)
+                trader = resolver.resolve(wallet=args.wallet, name=args.name)
+                progress.complete_stage(
+                    f"Resolved trader: {trader.display_name or trader.wallet}"
                 )
 
-            report_activities = [
-                item
-                for item in activities
-                if (
-                    analysis_start is None
-                    or item.timestamp >= int(analysis_start.timestamp())
+                history_end_ts = int(analysis_end.astimezone(UTC).timestamp())
+                progress.start_stage("Loading trade activity")
+                activities = client.get_user_activity(
+                    trader.wallet,
+                    end_ts=history_end_ts,
+                    activity_types=("TRADE",),
+                    progress_callback=progress.callback(),
                 )
-                and item.timestamp <= history_end_ts
-            ]
-            if not report_activities:
-                raise NoTradesFoundError("No trades matched the requested date range.")
+                progress.complete_stage(
+                    f"Loaded trade activity ({len(activities):,} trades)"
+                )
+                if not activities:
+                    raise NoTradesFoundError(
+                        "No public trade activity was found for this trader."
+                    )
 
-            metadata_slugs = sorted(
-                {item.event_slug for item in report_activities if item.event_slug}
-            )
-            metadata_by_event_slug = client.get_events_by_slug(metadata_slugs)
-            normalized_trades = normalize_trades(activities, metadata_by_event_slug)
+                report_activities = [
+                    item
+                    for item in activities
+                    if (
+                        analysis_start is None
+                        or item.timestamp >= int(analysis_start.timestamp())
+                    )
+                    and item.timestamp <= history_end_ts
+                ]
+                if not report_activities:
+                    raise NoTradesFoundError(
+                        "No trades matched the requested date range."
+                    )
 
-            positions = client.get_current_positions(trader.wallet)
-            closed_positions = client.get_closed_positions(trader.wallet)
-            total_value = client.get_total_value(trader.wallet)
-            closed_positions_realized_pnl = sum(
-                (item.realized_pnl or 0.0) for item in closed_positions
-            )
+                metadata_slugs = sorted(
+                    {item.event_slug for item in report_activities if item.event_slug}
+                )
+                progress.start_stage(
+                    "Fetching event metadata", total=len(metadata_slugs) or 1
+                )
+                metadata_by_event_slug = client.get_events_by_slug(
+                    metadata_slugs,
+                    progress_callback=progress.callback(),
+                )
+                progress.complete_stage(
+                    f"Fetched event metadata ({len(metadata_by_event_slug):,} events)"
+                )
 
-            report = analyze_trader(
-                trader=trader,
-                trades=normalized_trades,
-                positions=positions,
-                metadata_by_event_slug=metadata_by_event_slug,
-                total_value=total_value,
-                analysis_start=analysis_start,
-                analysis_end=analysis_end,
-                top_n=max(args.top, 1),
-                closed_positions_realized_pnl=closed_positions_realized_pnl,
-            )
+                progress.start_stage("Normalizing trades", total=len(activities) or 1)
+                normalized_trades = normalize_trades(
+                    activities,
+                    metadata_by_event_slug,
+                    progress_callback=progress.callback(),
+                )
+                progress.complete_stage(
+                    f"Normalized trades ({len(normalized_trades):,} records)"
+                )
+
+                progress.start_stage("Loading current positions")
+                positions = client.get_current_positions(
+                    trader.wallet,
+                    progress_callback=progress.callback(),
+                )
+                progress.complete_stage(
+                    f"Loaded current positions ({len(positions):,} rows)"
+                )
+
+                progress.start_stage("Loading closed positions")
+                closed_positions = client.get_closed_positions(
+                    trader.wallet,
+                    progress_callback=progress.callback(),
+                )
+                progress.complete_stage(
+                    f"Loaded closed positions ({len(closed_positions):,} rows)"
+                )
+
+                progress.start_stage("Loading total value snapshot", total=1)
+                total_value = client.get_total_value(trader.wallet)
+                progress.complete_stage("Loaded total value snapshot")
+                closed_positions_realized_pnl = sum(
+                    (item.realized_pnl or 0.0) for item in closed_positions
+                )
+
+                progress.start_stage("Running analytics", total=1)
+                report = analyze_trader(
+                    trader=trader,
+                    trades=normalized_trades,
+                    positions=positions,
+                    metadata_by_event_slug=metadata_by_event_slug,
+                    total_value=total_value,
+                    analysis_start=analysis_start,
+                    analysis_end=analysis_end,
+                    top_n=max(args.top, 1),
+                    closed_positions_realized_pnl=closed_positions_realized_pnl,
+                )
+                progress.complete_stage("Analysis complete")
 
             if args.csv_out:
                 trades_path, markets_path = export_csvs(
