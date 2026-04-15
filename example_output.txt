@@ -1,0 +1,61 @@
+Command:
+  .venv/bin/python cli.py --wallet 0x797D27B97F43429EC737f88B841e087c5C0D8298 --top 5
+
+Sample output:
+
+Trader: f2c59cac
+Wallet: 0x797d27b97f43429ec737f88b841e087c5c0d8298
+Date range: through 2026-04-15
+Trades analyzed: 28 (history loaded: 28)
+
+Overview
+  Realized PnL:    $-2.24
+  Unrealized PnL:  $-4.53
+  Total PnL:       $-6.77
+  Total Volume:    $27.24
+  Distinct Markets: 12
+  Market Win/Loss: 2W / 10L / 0F
+  Win Rate:        16.7%
+
+Top categories
+  elections  trades=10  volume=$10.68  share=39.2%  total_pnl=$-1.09
+  macro      trades=6   volume=$6.34   share=23.3%  total_pnl=$-2.06
+  crypto     trades=5   volume=$5.30   share=19.5%  total_pnl=$-2.95
+  geopolitics trades=5  volume=$3.72   share=13.6%  total_pnl=$-0.38
+
+Top markets by volume
+  Will Ethereum dip to $1500 in August?
+    trades=4 volume=$5.25 realized=$-1.17 unrealized=$-1.73 total=$-2.90
+  Will J.D. Vance win the 2028 Republican presidential nomination?
+    trades=2 volume=$4.55 realized=$-0.05 unrealized=$0.00 total=$-0.05
+  Will Zohran Mamdani not win the 2025 New York City mayoral election?
+    trades=6 volume=$4.17 realized=$-0.30 unrealized=$-0.70 total=$-1.00
+
+Behavior patterns
+  Average hold time: 14h 23m
+  Average entry price: 0.0084
+  Average exit price: 0.0087
+  Buy vs sell ratio: 1.80:1
+  YES preference: 67.9%
+  Average trade size: $0.97
+  Median trade size: $1.00
+  Favorite topics: elections, macro, crypto
+  Peak UTC hours: 16:00, 18:00, 14:00
+  Peak UTC days: Wednesday, Friday, Tuesday
+  Top market concentration: 19.3%
+  Top event concentration: 19.3%
+  Top category concentration: 39.2%
+
+Behavior summary
+  This account mostly trades elections and macro markets, with 19.3% of analyzed volume in
+  'Will Ethereum dip to $1500 in August?'. It leans YES (67.9% YES by trade count), and order
+  flow is buy-heavy. Closed positions are held about 14h 23m on average, and activity is
+  strongest around 16:00, 18:00 UTC, and the analyzed market win rate is 16.7%.
+
+PnL assumptions
+  - FIFO cost basis is applied chronologically per traded outcome token (asset).
+  - Realized PnL is recognized when a SELL closes earlier BUY lots for the same asset.
+  - Unrealized PnL is marked from public current-position prices when available; otherwise the
+    latest public event market price is used.
+  - If a SELL appears without enough prior BUY inventory, the unmatched quantity is assigned a
+    synthetic cost basis equal to the sell price so profit is not overstated.
