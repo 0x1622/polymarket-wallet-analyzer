@@ -259,7 +259,7 @@ After installing dependencies, you can run:
 
 A sample live output is included in `example_output.txt`.
 
-<img width="1528" height="960" alt="image" src="https://github.com/user-attachments/assets/5ee4e763-91e5-4049-8d88-c0c43dc2ff24" />
+[![asciicast](https://asciinema.org/a/jbtDDOQ4XdXgGLyQ.svg)](https://asciinema.org/a/jbtDDOQ4XdXgGLyQ)
 
 
 ## Current Limitations
