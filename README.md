@@ -259,6 +259,9 @@ After installing dependencies, you can run:
 
 A sample live output is included in `example_output.txt`.
 
+<img width="1528" height="960" alt="image" src="https://github.com/user-attachments/assets/5ee4e763-91e5-4049-8d88-c0c43dc2ff24" />
+
+
 ## Current Limitations
 
 - public APIs do not provide full historical position snapshots for exact past dates
